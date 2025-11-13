@@ -1,13 +1,14 @@
 import os
+import string
 
 from flask import Flask, request, jsonify, render_template_string
 import requests
 from datetime import datetime
-from cryptography.fernet import Fernet
 import json
 import base64
-KEY = os.getenv('CIPHER_KEY')
-CIPHER_SUITE = Fernet(str.encode(KEY))
+
+
+SECRET_KEY = os.getenv('CIPHER_KEY')
 app = Flask(__name__)
 
 # API 地址
@@ -179,34 +180,97 @@ def format_bytes(bytes_num):
 
 def encrypt_credentials(email, password):
     """
-    使用 Fernet 对称加密简化加密 email 和 password
-    返回加密后的字符串
+    将用户名和密码加密为32位token
+    :param username: 用户名
+    :param password: 密码
+    :return: 32位token（小写字母+数字）
     """
-    # 将 email 和 password 转换为 JSON 格式
-    credentials = json.dumps({"email": email, "password": password})
+    # 组合用户名和密码
+    credentials = f"{email}:{password}"
 
-    # 使用 Fernet 加密
-    encrypted = CIPHER_SUITE.encrypt(credentials.encode())
+    # 转换为数字（简单编码）
+    cred_num = 0
+    for char in credentials:
+        cred_num = cred_num * 256 + ord(char)
 
-    # 将加密结果转换为 URL 安全的 Base64 编码字符串
-    return base64.urlsafe_b64encode(encrypted).decode()
+    # 生成密钥数字
+    key_num = 0
+    for char in SECRET_KEY:
+        key_num = key_num * 256 + ord(char)
+
+    # 简单加密：使用大质数和模运算
+    encrypted_num = (cred_num * 31 + key_num) % (36 ** 32)
+
+    # 转换为32位token
+    chars = string.ascii_lowercase + string.digits
+    token = ""
+    base = len(chars)  # 36
+
+    temp_num = encrypted_num
+    for _ in range(32):
+        token = chars[temp_num % base] + token
+        temp_num //= base
+
+    return token
 
 
-def decrypt_credentials(key):
+def decrypt_credentials(token):
     """
     使用 Fernet 对称解密简化解密
     返回解密后的 email 和 password
     """
     try:
-        # 将 Base64 编码的字符串解码为字节
-        encrypted = base64.urlsafe_b64decode(key.encode())
+        """
+            从32位token解密出用户名和密码
+            :param token: 32位token
+            :return: (username, password) 元组
+            """
+        # 从token恢复数字
+        chars = string.ascii_lowercase + string.digits
+        char_to_num = {char: i for i, char in enumerate(chars)}
 
-        # 使用 Fernet 解密
-        decrypted = CIPHER_SUITE.decrypt(encrypted)
+        encrypted_num = 0
+        base = len(chars)  # 36
 
-        # 将解密后的 JSON 字符串解析为字典
-        credentials = json.loads(decrypted.decode())
-        return credentials["email"], credentials["password"]
+        for char in token:
+            encrypted_num = encrypted_num * base + char_to_num[char]
+
+        # 生成密钥数字
+        key_num = 0
+        for char in SECRET_KEY:
+            key_num = key_num * 256 + ord(char)
+
+        # 解密：求模逆元
+        mod = 36 ** 32
+
+        # 使用扩展欧几里得算法求31的模逆元
+        def extended_gcd(a, b):
+            if a == 0:
+                return b, 0, 1
+            gcd, x1, y1 = extended_gcd(b % a, a)
+            x = y1 - (b // a) * x1
+            y = x1
+            return gcd, x, y
+
+        _, inv, _ = extended_gcd(31, mod)
+        inv = inv % mod
+
+        # 解密
+        cred_num = ((encrypted_num - key_num) * inv) % mod
+
+        # 转换回字符串
+        credentials = ""
+        while cred_num > 0:
+            credentials = chr(cred_num % 256) + credentials
+            cred_num //= 256
+
+        # 分离用户名和密码
+        if ':' in credentials:
+            username, password = credentials.split(':', 1)
+            return username, password
+        else:
+            raise ValueError("解密失败：数据格式错误")
+
     except Exception as e:
         # 捕获异常并返回 None
         print(f"解密失败: {e}")
