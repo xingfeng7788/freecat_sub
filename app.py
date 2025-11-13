@@ -480,11 +480,7 @@ def subscribe_data():
         subscribe_url = result['data']['subscribe_url']
         if subscribe_url:
             subscription_data = get_subscription_data(subscribe_url)
-            return subscription_data if subscription_data else jsonify({
-                'success': False,
-                'message': '获取订阅数据失败',
-                'code': 500
-            }), 500
+            return subscription_data
         else:
             return jsonify({
                 'success': False,
