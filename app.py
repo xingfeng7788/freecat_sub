@@ -1,19 +1,150 @@
+import hashlib
 import os
-import string
+import sqlite3
+from contextlib import contextmanager
 
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 from flask import Flask, request, jsonify, render_template_string
 import requests
 from datetime import datetime
-import json
 import base64
 
 
-SECRET_KEY = os.getenv('CIPHER_KEY')
+SECRET_KEY = os.getenv('CIPHER_KEY', "test1234")
+ENCRYPTION_KEY = hashlib.sha256(str.encode(SECRET_KEY)).digest()  # 32字节
+FIXED_IV = b'tfteooysoqamaiuv'  # 16字节固定IV
 app = Flask(__name__)
 
 # API 地址
 LOGIN_URL = "https://bobapi.kkhhyytt.cn/api/v1/passport/auth/login"
 SUBSCRIBE_URL = "https://bobapi.kkhhyytt.cn/api/v1/user/getSubscribe"
+DB_PATH = './tokens.db'
+
+
+def init_database():
+    """初始化数据库表"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # 创建token存储表
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS token_storage
+                       (
+                           id
+                           INTEGER
+                           PRIMARY
+                           KEY
+                           AUTOINCREMENT,
+                           token
+                           TEXT
+                           UNIQUE
+                           NOT
+                           NULL,
+                           encrypted_data
+                           TEXT
+                           NOT
+                           NULL,
+                           created_at
+                           TIMESTAMP
+                           DEFAULT
+                           CURRENT_TIMESTAMP
+                       )
+                       ''')
+
+        # 创建索引提高查询性能
+        cursor.execute('''
+                       CREATE INDEX IF NOT EXISTS idx_token ON token_storage(token)
+                       ''')
+
+        conn.commit()
+        conn.close()
+        print("数据库初始化成功")
+
+    except Exception as e:
+        print(f"数据库初始化错误: {e}")
+
+
+@contextmanager
+def get_db_connection():
+    """数据库连接上下文管理器"""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        yield conn
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_token_to_db(token, encrypted_data):
+    """保存token到数据库"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO token_storage (token, encrypted_data) VALUES (?, ?)',
+                (token, encrypted_data)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"保存token到数据库错误: {e}")
+        return False
+
+
+def get_token_from_db(token):
+    """从数据库获取token对应的加密数据"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT encrypted_data FROM token_storage WHERE token = ?',
+                (token,)
+            )
+            result = cursor.fetchone()
+            return result[0] if result else None
+    except Exception as e:
+        print(f"从数据库获取token错误: {e}")
+        return None
+
+
+def delete_token_from_db(token):
+    """从数据库删除token"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'DELETE FROM token_storage WHERE token = ?',
+                (token,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"删除token错误: {e}")
+        return False
+
+
+def cleanup_expired_tokens(days=30):
+    """清理过期的token（可选功能）"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'DELETE FROM token_storage WHERE created_at < datetime("now", "-{} days")'.format(days)
+            )
+            conn.commit()
+            deleted_count = cursor.rowcount
+            print(f"清理了 {deleted_count} 个过期token")
+            return deleted_count
+    except Exception as e:
+        print(f"清理过期token错误: {e}")
+        return 0
 
 
 def login(email, password):
@@ -178,102 +309,100 @@ def format_bytes(bytes_num):
     return f"{bytes_num:.2f} PB"
 
 
-def encrypt_credentials(email, password):
+def encrypt_credentials(username, password):
     """
-    将用户名和密码加密为32位token
-    :param username: 用户名
-    :param password: 密码
-    :return: 32位token（小写字母+数字）
+    通过用户名和密码生成32位token
+
+    Args:
+        username (str): 用户名（邮箱）
+        password (str): 密码
+
+    Returns:
+        str: 32位token（小写字母和数字）
     """
-    # 组合用户名和密码
-    credentials = f"{email}:{password}"
+    try:
+        # 创建要加密的数据
+        data = f"{username}|{password}"
 
-    # 转换为数字（简单编码）
-    cred_num = 0
-    for char in credentials:
-        cred_num = cred_num * 256 + ord(char)
+        # 使用AES加密
+        cipher = AES.new(ENCRYPTION_KEY, AES.MODE_CBC, FIXED_IV)
+        encrypted_data = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
 
-    # 生成密钥数字
-    key_num = 0
-    for char in SECRET_KEY:
-        key_num = key_num * 256 + ord(char)
+        # 将加密数据编码为base64
+        encoded_data = base64.b64encode(encrypted_data).decode('utf-8')
 
-    # 简单加密：使用大质数和模运算
-    encrypted_num = (cred_num * 31 + key_num) % (36 ** 32)
+        # 生成32位token（只包含小写字母和数字）
+        # 使用加密数据的哈希值
+        hash_object = hashlib.sha256(encoded_data.encode())
+        hex_hash = hash_object.hexdigest()
 
-    # 转换为32位token
-    chars = string.ascii_lowercase + string.digits
-    token = ""
-    base = len(chars)  # 36
+        # 提取小写字母和数字
+        token_chars = []
+        for char in hex_hash:
+            if len(token_chars) >= 32:
+                break
+            if char.isdigit() or (char.isalpha() and char.islower()):
+                token_chars.append(char)
 
-    temp_num = encrypted_num
-    for _ in range(32):
-        token = chars[temp_num % base] + token
-        temp_num //= base
+        # 如果不够32位，继续从哈希值中提取
+        if len(token_chars) < 32:
+            # 使用MD5补充
+            md5_hash = hashlib.md5(encoded_data.encode()).hexdigest()
+            for char in md5_hash:
+                if len(token_chars) >= 32:
+                    break
+                if char.isdigit() or (char.isalpha() and char.islower()):
+                    token_chars.append(char)
 
-    return token
+        # 如果还是不够，用数字补充
+        while len(token_chars) < 32:
+            token_chars.append(str(len(token_chars) % 10))
+
+        token = ''.join(token_chars[:32])
+
+        # 保存token和加密数据到数据库
+        if save_token_to_db(token, encoded_data):
+            return token
+        else:
+            print("保存token到数据库失败")
+            return None
+
+    except Exception as e:
+        print(f"加密错误: {e}")
+        return None
 
 
 def decrypt_credentials(token):
     """
-    使用 Fernet 对称解密简化解密
-    返回解密后的 email 和 password
+    通过token解密获取用户名和密码
+
+    Args:
+        token (str): 32位token
+
+    Returns:
+        tuple: (username, password) 或 (None, None) 如果解密失败
     """
     try:
-        """
-            从32位token解密出用户名和密码
-            :param token: 32位token
-            :return: (username, password) 元组
-            """
-        # 从token恢复数字
-        chars = string.ascii_lowercase + string.digits
-        char_to_num = {char: i for i, char in enumerate(chars)}
+        # 从数据库获取加密数据
+        encoded_data = get_token_from_db(token)
+        if not encoded_data:
+            print("Token不存在或已过期")
+            return None, None
 
-        encrypted_num = 0
-        base = len(chars)  # 36
-
-        for char in token:
-            encrypted_num = encrypted_num * base + char_to_num[char]
-
-        # 生成密钥数字
-        key_num = 0
-        for char in SECRET_KEY:
-            key_num = key_num * 256 + ord(char)
-
-        # 解密：求模逆元
-        mod = 36 ** 32
-
-        # 使用扩展欧几里得算法求31的模逆元
-        def extended_gcd(a, b):
-            if a == 0:
-                return b, 0, 1
-            gcd, x1, y1 = extended_gcd(b % a, a)
-            x = y1 - (b // a) * x1
-            y = x1
-            return gcd, x, y
-
-        _, inv, _ = extended_gcd(31, mod)
-        inv = inv % mod
+        encrypted_data = base64.b64decode(encoded_data.encode('utf-8'))
 
         # 解密
-        cred_num = ((encrypted_num - key_num) * inv) % mod
+        cipher = AES.new(ENCRYPTION_KEY, AES.MODE_CBC, FIXED_IV)
+        decrypted_data = unpad(cipher.decrypt(encrypted_data), AES.block_size)
 
-        # 转换回字符串
-        credentials = ""
-        while cred_num > 0:
-            credentials = chr(cred_num % 256) + credentials
-            cred_num //= 256
+        # 解析数据
+        data_str = decrypted_data.decode('utf-8')
+        username, password = data_str.split('|', 1)
 
-        # 分离用户名和密码
-        if ':' in credentials:
-            username, password = credentials.split(':', 1)
-            return username, password
-        else:
-            raise ValueError("解密失败：数据格式错误")
+        return username, password
 
     except Exception as e:
-        # 捕获异常并返回 None
-        print(f"解密失败: {e}")
+        print(f"解密错误: {e}")
         return None, None
 
 
@@ -763,4 +892,5 @@ def index():
 
 
 if __name__ == '__main__':
+    init_database()
     app.run(debug=True, host='0.0.0.0', port=5000)
