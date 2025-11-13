@@ -1,9 +1,13 @@
+import os
+
 from flask import Flask, request, jsonify, render_template_string
 import requests
-import json
 from datetime import datetime
+from cryptography.fernet import Fernet
+import json
 import base64
-
+KEY = os.getenv('CIPHER_KEY')
+CIPHER_SUITE = Fernet(str.encode(KEY))
 app = Flask(__name__)
 
 # API 地址
@@ -174,19 +178,38 @@ def format_bytes(bytes_num):
 
 
 def encrypt_credentials(email, password):
-    """简化的加密：使用 base64 编码"""
+    """
+    使用 Fernet 对称加密简化加密 email 和 password
+    返回加密后的字符串
+    """
+    # 将 email 和 password 转换为 JSON 格式
     credentials = json.dumps({"email": email, "password": password})
-    encoded = base64.urlsafe_b64encode(credentials.encode()).decode()
-    return encoded
+
+    # 使用 Fernet 加密
+    encrypted = CIPHER_SUITE.encrypt(credentials.encode())
+
+    # 将加密结果转换为 URL 安全的 Base64 编码字符串
+    return base64.urlsafe_b64encode(encrypted).decode()
 
 
 def decrypt_credentials(key):
-    """简化的解密：使用 base64 解码"""
+    """
+    使用 Fernet 对称解密简化解密
+    返回解密后的 email 和 password
+    """
     try:
-        decoded = base64.urlsafe_b64decode(key.encode()).decode()
-        credentials = json.loads(decoded)
+        # 将 Base64 编码的字符串解码为字节
+        encrypted = base64.urlsafe_b64decode(key.encode())
+
+        # 使用 Fernet 解密
+        decrypted = CIPHER_SUITE.decrypt(encrypted)
+
+        # 将解密后的 JSON 字符串解析为字典
+        credentials = json.loads(decrypted.decode())
         return credentials["email"], credentials["password"]
     except Exception as e:
+        # 捕获异常并返回 None
+        print(f"解密失败: {e}")
         return None, None
 
 
