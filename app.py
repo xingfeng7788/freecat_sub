@@ -260,7 +260,7 @@ def get_subscribe():
     return jsonify(result)
 
 
-@app.route('/api/subscribe-data', methods=['GET'])
+@app.route('/api/sub', methods=['GET'])
 def subscribe_data():
     key = request.args.get('key')
 
@@ -679,7 +679,7 @@ def index():
 
             function copySubscribeLink(key) {
                 const host = window.location.origin;
-                const subscribeLink = `${host}/api/subscribe-data?key=${encodeURIComponent(key)}`;
+                const subscribeLink = `${host}/api/sub?key=${encodeURIComponent(key)}`;
                 navigator.clipboard.writeText(subscribeLink).then(() => {
                     alert('✅ 订阅接口链接已复制到剪贴板！');
                 }).catch(err => {
