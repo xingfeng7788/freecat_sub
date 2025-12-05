@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, make_response
 import requests
 from datetime import datetime
 import base64
@@ -295,8 +295,7 @@ def get_subscription_data(subscribe_url, params=None):
         response.raise_for_status()
         # 输出响应内容
         print(f"Status Code: {response.status_code}")
-        print("Response Body:")
-        return response.text
+        return response
     except Exception as e:
         raise e
 
@@ -480,8 +479,20 @@ def subscribe_data():
         subscribe_url = result['data']['subscribe_url']
         if subscribe_url:
             params = {k: v for k, v in request.args.items() if k != 'key'}
-            subscription_data = get_subscription_data(subscribe_url, params=params)
-            return subscription_data
+            upstream_response = get_subscription_data(subscribe_url, params=params)
+            
+            response = make_response(upstream_response.content)
+            
+            # Forward Content-Type
+            if 'Content-Type' in upstream_response.headers:
+                response.headers['Content-Type'] = upstream_response.headers['Content-Type']
+                
+            # Forward other relevant headers
+            for header in ['Content-Disposition', 'Subscription-Userinfo']:
+                if header in upstream_response.headers:
+                    response.headers[header] = upstream_response.headers[header]
+                    
+            return response
         else:
             return jsonify({
                 'success': False,
